@@ -210,6 +210,10 @@ static uint64_t gptm_read(void *opaque, hwaddr offset,
         qemu_log_mask(LOG_UNIMP,
                       "GPTM: read of TBR but timer read not supported\n");
         return 0;
+    case 0x50: /* TAV */
+        return s->tick[0];
+    case 0x54: /* TBV */
+        return s->tick[0];
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "GPTM: read at bad offset 0x02%" HWADDR_PRIx "\n",
