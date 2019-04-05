@@ -67,6 +67,7 @@ typedef struct gptm_state {
     uint32_t state;
     uint32_t mask;
     uint32_t load[2];
+    uint32_t load_shadow;
     uint32_t match[2];
     uint32_t prescale[2];
     uint32_t match_prescale[2];
@@ -77,6 +78,8 @@ typedef struct gptm_state {
     /* The timers have an alternate output used to trigger the ADC.  */
     qemu_irq trigger;
     qemu_irq irq;
+    uint32_t tav;
+    uint32_t tbv;
 } gptm_state;
 
 static void gptm_update_irq(gptm_state *s)
@@ -95,15 +98,19 @@ static void gptm_reload(gptm_state *s, int n, int reset)
 {
     int64_t tick;
     if (reset)
-        tick = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        tick = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     else
         tick = s->tick[n];
 
     if (s->config == 0) {
-        /* 32-bit CountDown.  */
-        uint32_t count;
-        count = s->load[0] | (s->load[1] << 16);
-        tick += (int64_t)count * system_clock_scale;
+        /* 32-bit CountDown from LOAD  */
+	if (s->load_shadow > 0)
+		s->load_shadow--;
+	else {
+	    /* reload after timeout */
+	    s->load_shadow = s->load[0] | (s->load[1] << 16);
+	}
+	tick += 1; /* 1m tick */
     } else if (s->config == 1) {
         /* 32-bit RTC.  1Hz tick.  */
         tick += NANOSECONDS_PER_SECOND;
@@ -118,28 +125,32 @@ static void gptm_reload(gptm_state *s, int n, int reset)
     s->tick[n] = tick;
     timer_mod(s->timer[n], tick);
 }
-
 static void gptm_tick(void *opaque)
 {
     gptm_state **p = (gptm_state **)opaque;
     gptm_state *s;
     int n;
-
     s = *p;
+    if (s->tav == 0xffffffff) {
+	    s->tav = 0;
+	    s->tbv++;
+    }
+    s->tav++;
     n = p - s->opaque;
     if (s->config == 0) {
-        s->state |= 1;
-        if ((s->control & 0x20)) {
-            /* Output trigger.  */
-            qemu_irq_pulse(s->trigger);
-        }
-        if (s->mode[0] & 1) {
-            /* One-shot.  */
-            s->control &= ~1;
-        } else {
-            /* Periodic.  */
-            gptm_reload(s, 0, 0);
-        }
+	    if (s->load_shadow == 0)
+            	s->state |= 1;
+            if ((s->control & 0x20)) {
+                 /* Output trigger.  */
+                 qemu_irq_pulse(s->trigger);
+            }
+            if (s->mode[0] & 1) {
+                 /* One-shot.  */
+                 s->control &= ~1;
+            } else {
+                /* Periodic.  */
+                gptm_reload(s, 0, 0);
+            }
     } else if (s->config == 1) {
         /* RTC.  */
         uint32_t match;
@@ -211,9 +222,9 @@ static uint64_t gptm_read(void *opaque, hwaddr offset,
                       "GPTM: read of TBR but timer read not supported\n");
         return 0;
     case 0x50: /* TAV */
-        return s->tick[0];
+        return s->tav;
     case 0x54: /* TBV */
-        return s->tick[0];
+        return s->tbv;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "GPTM: read at bad offset 0x02%" HWADDR_PRIx "\n",
@@ -269,6 +280,7 @@ static void gptm_write(void *opaque, hwaddr offset,
         break;
     case 0x28: /* TAILR */
         s->load[0] = value & 0xffff;
+	s->load_shadow = value;
         if (s->config < 4) {
             s->load[1] = value >> 16;
         }
@@ -347,8 +359,8 @@ static void stellaris_gptm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 
     s->opaque[0] = s->opaque[1] = s;
-    s->timer[0] = timer_new_ns(QEMU_CLOCK_VIRTUAL, gptm_tick, &s->opaque[0]);
-    s->timer[1] = timer_new_ns(QEMU_CLOCK_VIRTUAL, gptm_tick, &s->opaque[1]);
+    s->timer[0] = timer_new_ms(QEMU_CLOCK_VIRTUAL, gptm_tick, &s->opaque[0]);
+    s->timer[1] = timer_new_ms(QEMU_CLOCK_VIRTUAL, gptm_tick, &s->opaque[1]);
 }
 
 
