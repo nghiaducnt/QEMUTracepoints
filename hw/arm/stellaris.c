@@ -386,6 +386,27 @@ typedef struct {
     stellaris_board_info *board;
 } ssys_state;
 
+/* System controller for cc2538, no overlap with stellaris */
+
+typedef struct {
+    MemoryRegion iomem;
+    uint32_t sys_ctrl_clk_ctrl;
+    uint32_t sys_ctrl_clk_sta;
+    uint32_t rcgcgpt; /* GPTMs clock when cpu in active mode */
+    uint32_t scgcgpt; /* GPTMs clock when cpu in sleep mode */
+    uint32_t dcgcgpt; /* GPTMs clock when cpu in pm0 */
+    uint32_t srgpt; /* reset for GPTMs */
+    uint32_t rcgcssi; /* clock for ssi when cpu in active mode */
+    uint32_t scgcssi; /* clock for ssi when cpu in sleep mode */
+    uint32_t dcgcssi; /* clock for ssi when cpu in pm0 mode */
+    uint32_t srssi; /* reset for SSI */
+    uint32_t sys_ctrl_unnamed1; /* UART0 and 1 clock in active mode */
+    uint32_t sys_ctrl_unnamed2; /* UART0 and 1 clock in sleep mode  */
+    uint32_t sys_ctrl_unnamed3; /* UART0 and 1 clock in pm0 mode  */
+    qemu_irq irq;
+    stellaris_board_info *board;
+} cc2538_ssys_state;
+
 static void ssys_update(ssys_state *s)
 {
   qemu_set_irq(s->irq, (s->int_status & s->int_mask) != 0);
@@ -655,6 +676,54 @@ static const MemoryRegionOps ssys_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+
+
+static uint64_t cc2538_ssys_read(void *opaque, hwaddr offset,
+                          unsigned size)
+{
+    cc2538_ssys_state *s = (cc2538_ssys_state *)opaque;
+
+    switch (offset) {
+    case 0x000:
+        return s->sys_ctrl_clk_ctrl;
+    case 0x004:
+        return s->sys_ctrl_clk_sta;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "CC2538 SSYS: read at bad offset 0x%x\n", (int)offset);
+        return 0;
+    }
+}
+static void cc2538_ssys_write(void *opaque, hwaddr offset,
+                       uint64_t value, unsigned size)
+{
+    cc2538_ssys_state *s = (cc2538_ssys_state *)opaque;
+
+    switch (offset) {
+    case 0x0: /* sys_ctrl_clk_ctrl */
+        s->sys_ctrl_clk_ctrl = value & 0xffffffff;
+    case 0x4:
+        /* FALL THOURGH */
+        s->sys_ctrl_clk_sta = value & 0xffffffff;
+        break;
+    case 0x8:
+	s->rcgcgpt = value & 0xffffffff;
+	break;
+    case 0xc:
+	s->scgcgpt = value & 0xffffffff;
+	break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "CC2538 SSYS: write at bad offset 0x%x\n", (int)offset);
+    }
+}
+
+static const MemoryRegionOps cc2538_ssys_ops = {
+    .read = cc2538_ssys_read,
+    .write = cc2538_ssys_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
 static void ssys_reset(void *opaque)
 {
     ssys_state *s = (ssys_state *)opaque;
@@ -725,6 +794,41 @@ static int stellaris_sys_init(uint32_t base, qemu_irq irq,
 }
 
 
+static int cc2538_sys_post_load(void *opaque, int version_id)
+{
+    cc2538_ssys_state *s = opaque;
+    (void)s;
+    (void)version_id;
+
+    return 0;
+}
+static const VMStateDescription vmstate_cc2538_sys = {
+    .name = "cc2538_sys",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .post_load = cc2538_sys_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(sys_ctrl_clk_ctrl, cc2538_ssys_state),
+        VMSTATE_UINT32(sys_ctrl_clk_sta, cc2538_ssys_state),
+        VMSTATE_END_OF_LIST()
+    }
+};
+static int cc2538_sys_init(uint32_t base, qemu_irq irq,
+                              stellaris_board_info * board,
+                              uint8_t *macaddr)
+{
+    cc2538_ssys_state *s;
+    (void)macaddr;
+
+    s = g_new0(cc2538_ssys_state, 1);
+    s->irq = irq;
+    s->board = board;
+
+    memory_region_init_io(&s->iomem, NULL, &cc2538_ssys_ops, s, "cc2538_ssys", 0x00001000);
+    memory_region_add_subregion(get_system_memory(), base, &s->iomem);
+    vmstate_register(NULL, -1, &vmstate_cc2538_sys, s);
+    return 0;
+}
 /* I2C controller.  */
 
 #define TYPE_STELLARIS_I2C "stellaris-i2c"
@@ -1284,6 +1388,7 @@ static void stellaris_init(MachineState *ms, stellaris_board_info *board)
      * 40038000 ADC
      * 4003c000 analogue comparator (unimplemented)
      * 40048000 ethernet
+     * 400d2000 CC2538 System Control (not complete)
      * 400fc000 hibernation module (unimplemented)
      * 400fd000 flash memory control (unimplemented)
      * 400fe000 system control
@@ -1353,6 +1458,8 @@ static void stellaris_init(MachineState *ms, stellaris_board_info *board)
 
     stellaris_sys_init(0x400fe000, qdev_get_gpio_in(nvic, 28),
                        board, nd_table[0].macaddr.a);
+    cc2538_sys_init(0x400d2000, qdev_get_gpio_in(nvic, 28),
+                       board, NULL);
 
     for (i = 0; i < 7; i++) {
         if (board->dc4 & (1 << i)) {
